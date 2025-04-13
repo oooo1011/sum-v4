@@ -340,15 +340,8 @@ class SubsetSumApp:
             raise ValueError("内存限制必须是正整数")
     
     def _update_progress(self, progress):
-        """更新进度条"""
-        if not hasattr(self, 'calculation_manager') or not self.calculation_manager.calculation_thread or not self.calculation_manager.calculation_thread.is_alive():
-            return
-        
-        self.progress_var.set(progress / 100.0)  # CTk进度条范围是0-1
-        self.progress_label.configure(text=f"{progress:.1f}%")
-        self.progress_bar.set(progress / 100.0)
-        
-        # 如果计算完成，启用开始按钮
+        """更新进度条 - 不再使用，保留为兼容性"""
+        # 仅在计算完成时启用UI
         if progress >= 100:
             self._enable_ui()
     
@@ -383,24 +376,53 @@ class SubsetSumApp:
         # 禁用UI
         self._disable_ui()
         
-        # 重置进度
-        self.progress_var.set(0)
-        self.progress_bar.set(0)
-        self.progress_label.configure(text="0.0%")
-        self.status_var.set(f"计算中... ({len(numbers)} 个数字)")
+        # 清除之前的结果显示
+        if hasattr(self, 'result_text'):
+            self.result_text.configure(state="normal")
+            self.result_text.delete(1.0, tk.END)
+            self.result_text.insert(tk.END, "计算中，请稍候...\n")
+            self.result_text.configure(state="disabled")
         
-        # 开始计算
-        self.calculation_manager.start_calculation(numbers, target, max_solutions, memory_limit)
+        # 状态提示（不再显示进度百分比）
+        self.status_var.set(f"计算中... ({len(numbers)} 个数字, 目标和: {target})")
+        
+        # 强制更新界面，确保状态信息立即显示
+        self.root.update()
+        
+        # 使用新的启动方法，传递root窗口用于UI刷新
+        if hasattr(self.calculation_manager, 'start_calculation_with_progress'):
+            self.calculation_manager.start_calculation_with_progress(
+                numbers, target, max_solutions, memory_limit, self.root
+            )
+        else:
+            # 兼容旧方法
+            self.calculation_manager.start_calculation(numbers, target, max_solutions, memory_limit)
         
         # 启动队列检查
         self._check_calculation_queue()
     
     def _check_calculation_queue(self):
         """检查计算队列"""
-        if not self.calculation_manager.check_queue():
-            # 如果计算仍在进行，再次调度检查
-            if hasattr(self, 'calculation_manager') and self.calculation_manager.calculation_thread and self.calculation_manager.calculation_thread.is_alive():
-                self.root.after(100, self._check_calculation_queue)
+        # 强制刷新界面，处理所有积压的GUI事件
+        self.root.update()
+        
+        # 检查计算队列是否有结果
+        has_result = self.calculation_manager.check_queue()
+        
+        # 如果计算仍在进行
+        if not has_result and hasattr(self, 'calculation_manager') and self.calculation_manager.calculation_thread and self.calculation_manager.calculation_thread.is_alive():
+            # 添加动态状态更新以显示程序正在运行
+            current_status = self.status_var.get()
+            if "计算中" in current_status and not current_status.endswith("..."):
+                dots = current_status.count(".")
+                if dots >= 3:
+                    new_status = current_status.replace("...", "")
+                else:
+                    new_status = current_status + "."
+                self.status_var.set(new_status)
+            
+            # 使用更短的时间间隔来更新UI
+            self.root.after(10, self._check_calculation_queue)
     
     def _stop_calculation(self):
         """停止计算"""
@@ -421,6 +443,8 @@ class SubsetSumApp:
             self.result_text.insert(tk.END, "未找到解决方案")
             self.result_text.configure(state="disabled")
             self.status_var.set("计算完成，未找到解决方案")
+            # 恢复UI状态
+            self._enable_ui()
             return
         
         self.current_solutions = solutions
@@ -437,6 +461,9 @@ class SubsetSumApp:
         # 如果启用了可视化，显示图表
         if self.config.get("show_visualization", True) and solutions:
             Visualizer.create_visualization(self.canvas_frame, self.input_numbers, solutions[0])
+            
+        # 恢复UI状态
+        self._enable_ui()
     
     def _display_error(self, error_msg):
         """显示错误信息"""
@@ -495,6 +522,20 @@ class SubsetSumApp:
         # 导出数据
         if export_to_excel(self.input_numbers, self.current_solutions, file_path):
             self.status_var.set(f"结果已导出至: {os.path.basename(file_path)}")
+            
+            # 询问用户是否打开文件
+            if tk.messagebox.askyesno("导出成功", f"结果已成功导出到{os.path.basename(file_path)}。\n\n是否打开文件？"):
+                try:
+                    # 使用系统默认程序打开文件
+                    import subprocess
+                    if platform.system() == 'Windows':
+                        os.startfile(file_path)
+                    elif platform.system() == 'Darwin':  # macOS
+                        subprocess.call(('open', file_path))
+                    else:  # Linux或其他系统
+                        subprocess.call(('xdg-open', file_path))
+                except Exception as e:
+                    tk.messagebox.showerror("打开文件错误", f"无法打开文件: {str(e)}")
 
 
 def main():

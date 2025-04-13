@@ -730,20 +730,9 @@ def create_result_area(parent_frame, subtitle_font, export_callback):
     result_label = ctk.CTkLabel(result_frame, text="计算结果", font=subtitle_font)
     result_label.pack(anchor=tk.W, padx=10, pady=5)
     
-    # 进度条
-    progress_frame = ctk.CTkFrame(result_frame)
-    progress_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-    
-    progress_label_text = ctk.CTkLabel(progress_frame, text="计算进度:")
-    progress_label_text.pack(anchor=tk.W)
-    
-    progress_bar = ctk.CTkProgressBar(progress_frame)
-    progress_bar.pack(fill=tk.X, pady=(5, 0))
-    progress_bar.set(0)
-    
-    # 进度文本
-    progress_label = ctk.CTkLabel(progress_frame, text="0.0%")
-    progress_label.pack(anchor=tk.E, pady=(5, 0))
+    # 创建两个空控件以保持API兼容性
+    progress_bar = tk.Frame()  # 空的框架作为placeholder
+    progress_label = tk.Label()  # 空的标签作为placeholder
     
     # 结果文本区
     result_header_frame = ctk.CTkFrame(result_frame)

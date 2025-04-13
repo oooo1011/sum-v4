@@ -115,10 +115,53 @@ class CalculationManager:
                 return True
             
         except queue.Empty:
+            # 队列为空，检查是否已经计算完毕但线程还活着
+            if self.calculation_thread and not self.calculation_thread.is_alive():
+                # 线程已结束但队列为空，可能是完成了但没有输出结果
+                return True
             # 队列为空，继续等待
             return False
         
         return False
+        
+    def start_calculation_with_progress(self, numbers: List[float], target: float, max_solutions: int, memory_limit: int, root_window):
+        """开始计算并设置进度更新（带UI刷新）
+        
+        Args:
+            numbers: 输入数字列表
+            target: 目标和
+            max_solutions: 最大解决方案数量
+            memory_limit: 内存限制(MB)
+            root_window: 根窗口，用于刷新UI
+        """
+        # 创建结果队列
+        self.result_queue = queue.Queue()
+        
+        # 设置进度回调（包含UI刷新）
+        if hasattr(self.solver, 'set_progress_callback'):
+            def progress_callback(progress):
+                # 更新进度
+                if self.on_progress_update:
+                    self.on_progress_update(progress)
+                # 刷新界面
+                if root_window and root_window.winfo_exists():
+                    try:
+                        root_window.update()
+                    except:
+                        pass
+            
+            try:
+                self.solver.set_progress_callback(progress_callback)
+            except Exception as e:
+                print(f"设置进度回调失败: {str(e)}")
+        
+        # 启动计算线程
+        self.calculation_thread = threading.Thread(
+            target=self._calculation_worker,
+            args=(numbers, target, max_solutions, memory_limit)
+        )
+        self.calculation_thread.daemon = True
+        self.calculation_thread.start()
     
     def stop_calculation(self):
         """停止计算"""
