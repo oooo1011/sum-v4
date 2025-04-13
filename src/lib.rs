@@ -10,6 +10,8 @@ use std::cmp::Ordering as CmpOrdering;
 pub struct SubsetSumSolver {
     progress: Arc<AtomicU64>,
     should_stop: Arc<AtomicBool>,
+    total_combinations: Arc<AtomicU64>,
+    processed_combinations: Arc<AtomicU64>,
 }
 
 #[pymethods]
@@ -20,6 +22,8 @@ impl SubsetSumSolver {
         SubsetSumSolver {
             progress: Arc::new(AtomicU64::new(0)),
             should_stop: Arc::new(AtomicBool::new(false)),
+            total_combinations: Arc::new(AtomicU64::new(0)),
+            processed_combinations: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -27,6 +31,8 @@ impl SubsetSumSolver {
     fn reset(&mut self) {
         self.progress.store(0, Ordering::SeqCst);
         self.should_stop.store(false, Ordering::SeqCst);
+        self.total_combinations.store(0, Ordering::SeqCst);
+        self.processed_combinations.store(0, Ordering::SeqCst);
     }
 
     /// 停止计算
@@ -36,7 +42,9 @@ impl SubsetSumSolver {
 
     /// 获取当前进度（百分比）
     fn get_progress(&self) -> f64 {
-        self.progress.load(Ordering::SeqCst) as f64 / 100.0
+        let total_combinations = self.total_combinations.load(Ordering::SeqCst);
+        let processed_combinations = self.processed_combinations.load(Ordering::SeqCst);
+        (processed_combinations as f64 / total_combinations as f64) * 100.0
     }
 
     /// 查找和为目标值的子集
@@ -61,95 +69,63 @@ impl SubsetSumSolver {
         if numbers.is_empty() {
             return Err(PyValueError::new_err("输入数字列表不能为空"));
         }
-        
-        if max_solutions == 0 {
-            return Err(PyValueError::new_err("最大解决方案数量必须大于0"));
-        }
-        
+
         // 重置状态
         self.reset();
         
-        // 排序可以提高剪枝效率
-        let mut sorted_numbers = numbers.clone();
-        sorted_numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(CmpOrdering::Equal));
+        // 将浮点数乘以100并转换为整数，以避免浮点数精度问题
+        let int_numbers: Vec<i64> = numbers.iter().map(|&x| (x * 100.0).round() as i64).collect();
+        let int_target = (target * 100.0).round() as i64;
         
-        // 共享状态
-        let solutions = Arc::new(Mutex::new(Vec::<Vec<usize>>::new()));
-        let should_stop = self.should_stop.clone();
-        let progress = self.progress.clone();
+        // 排序数字（从大到小，有助于更快找到解）
+        let mut sorted_numbers = int_numbers.clone();
+        sorted_numbers.sort_by(|a, b| b.cmp(a));
         
-        // 计算分块大小
-        let num_threads = num_cpus::get();
-        let chunk_size = std::cmp::max(1, sorted_numbers.len() / num_threads);
+        // 创建共享数据结构
+        let solutions = Arc::new(Mutex::new(Vec::new()));
+        let should_stop = Arc::clone(&self.should_stop);
         
-        // 并行处理
-        sorted_numbers.par_chunks(chunk_size)
-            .enumerate()
-            .for_each(|(chunk_id, chunk)| {
-                if should_stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                
-                let chunk_start_idx = chunk_id * chunk_size;
-                
-                for (i, &num) in chunk.iter().enumerate() {
-                    let idx = chunk_start_idx + i;
-                    
-                    if should_stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    
-                    // 单个数字就是解
-                    if (num - target).abs() < 1e-6 {
-                        let mut sols = solutions.lock().unwrap();
-                        if sols.len() < max_solutions {
-                            sols.push(vec![idx]);
-                            if sols.len() >= max_solutions {
-                                should_stop.store(true, Ordering::SeqCst);
-                                break;
-                            }
-                        }
-                    }
-                    
-                    // 回溯查找
-                    let mut current_subset = vec![idx];
-                    let mut current_sum = num;
-                    
-                    self.backtrack(
-                        &sorted_numbers, 
-                        target, 
-                        idx + 1, 
-                        current_sum, 
-                        &mut current_subset, 
-                        &solutions, 
-                        max_solutions, 
-                        &should_stop,
-                        memory_limit_mb,
-                    );
-                    
-                    // 更新进度
-                    let chunk_progress = (i as u64 * 100) / chunk.len() as u64;
-                    let total_progress = (chunk_id as u64 * 100) / num_threads as u64 + chunk_progress / num_threads as u64;
-                    progress.store(total_progress, Ordering::SeqCst);
-                    
-                    // 检查是否已找到足够解
-                    let sols_len = solutions.lock().unwrap().len();
-                    if sols_len >= max_solutions {
-                        should_stop.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                }
-            });
+        // 设置进度计算
+        let total_combinations = 2_u64.pow(sorted_numbers.len().min(30) as u32);
+        self.total_combinations.store(total_combinations, Ordering::SeqCst);
+        self.processed_combinations.store(0, Ordering::SeqCst);
         
-        // 转换索引为实际数字
-        let final_solutions = solutions.lock().unwrap();
+        // 创建线程池
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_cpus::get())
+            .build()
+            .unwrap();
+        
+        // 并行执行回溯算法
+        pool.install(|| {
+            // 创建初始子集
+            let mut current_subset = Vec::new();
+            
+            // 执行回溯
+            self.backtrack_int(
+                &sorted_numbers,
+                int_target,
+                0,
+                0,
+                &mut current_subset,
+                &solutions,
+                max_solutions,
+                &should_stop,
+                memory_limit_mb,
+            );
+        });
+        
+        // 获取结果并转换回原始索引
+        let index_solutions = solutions.lock().unwrap();
+        
+        // 将索引解转换为实际数字解
         let mut result = Vec::new();
-        
-        for solution in final_solutions.iter() {
-            let subset: Vec<f64> = solution.iter()
-                .map(|&idx| sorted_numbers[idx])
-                .collect();
-            result.push(subset);
+        for indices in index_solutions.iter() {
+            let mut solution = Vec::new();
+            for &idx in indices {
+                solution.push(numbers[idx]);
+            }
+            result.push(solution);
         }
         
         Ok(result)
@@ -157,13 +133,13 @@ impl SubsetSumSolver {
 }
 
 impl SubsetSumSolver {
-    /// 回溯算法核心实现
-    fn backtrack(
+    /// 回溯算法核心实现（整数版本）
+    fn backtrack_int(
         &self,
-        numbers: &[f64],
-        target: f64,
+        numbers: &[i64],
+        target: i64,
         start: usize,
-        current_sum: f64,
+        current_sum: i64,
         current_subset: &mut Vec<usize>,
         solutions: &Arc<Mutex<Vec<Vec<usize>>>>,
         max_solutions: usize,
@@ -180,8 +156,8 @@ impl SubsetSumSolver {
             return;
         }
         
-        // 找到一个解
-        if (current_sum - target).abs() < 1e-6 {
+        // 找到一个解（使用精确整数比较）
+        if current_sum == target {
             let mut sols = solutions.lock().unwrap();
             if sols.len() < max_solutions {
                 sols.push(current_subset.clone());
@@ -204,7 +180,7 @@ impl SubsetSumSolver {
         
         // 选择当前数字
         current_subset.push(start);
-        self.backtrack(
+        self.backtrack_int(
             numbers, 
             target, 
             start + 1, 
@@ -218,17 +194,22 @@ impl SubsetSumSolver {
         current_subset.pop();
         
         // 不选择当前数字
-        self.backtrack(
-            numbers, 
-            target, 
-            start + 1, 
-            current_sum, 
-            current_subset, 
-            solutions, 
-            max_solutions, 
+        self.backtrack_int(
+            numbers,
+            target,
+            start + 1,
+            current_sum,
+            current_subset,
+            solutions,
+            max_solutions,
             should_stop,
             memory_limit_mb,
         );
+        
+        // 更新进度（只在顶层递归调用中）
+        if start == 0 {
+            self.processed_combinations.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
