@@ -1,6 +1,6 @@
 [package]
 name = "subset_sum"
-version = "0.1.0"
+version = "1.1.0"
 edition = "2021"
 
 [lib]
@@ -11,3 +11,7 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.18.3", features = ["extension-module"] }
 rayon = "1.7.0"
 num_cpus = "1.15.0"
+chrono = "0.4.31"
+
+[build-dependencies]
+chrono = "0.4.31"
