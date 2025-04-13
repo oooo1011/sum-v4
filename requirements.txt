@@ -1,2 +1,6 @@
 maturin>=0.14.7
 XlsxWriter>=3.0.0
+customtkinter>=5.2.0
+matplotlib>=3.5.0
+openpyxl>=3.0.10
+pyinstaller>=6.0.0
