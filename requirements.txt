@@ -1,0 +1,2 @@
+maturin>=0.14.7
+XlsxWriter>=3.0.0

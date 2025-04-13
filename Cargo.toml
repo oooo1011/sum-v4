@@ -1,0 +1,13 @@
+[package]
+name = "subset_sum"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "subset_sum"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.18.3", features = ["extension-module"] }
+rayon = "1.7.0"
+num_cpus = "1.15.0"

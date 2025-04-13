@@ -1,0 +1,37 @@
+# Rust相关
+/target/
+Cargo.lock
+
+# Python相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller相关
+build/
+dist/
+*.spec
+
+# 其他
+.venv/
+.env
+.idea/
+.vscode/
+*.log
