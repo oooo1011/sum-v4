@@ -26,8 +26,13 @@ class SubsetSumApp:
         self.root.minsize(800, 600)
         
         # 设置图标（如果有）
-        if platform.system() == "Windows" and os.path.exists("icon.ico"):
-            self.root.iconbitmap("icon.ico")
+        icon_path = "app_icon.ico"
+        if os.path.exists(icon_path):
+            try:
+                self.root.iconbitmap(icon_path)
+                print(f"成功加载图标: {os.path.abspath(icon_path)}")
+            except Exception as e:
+                print(f"加载图标失败: {str(e)}")
         
         # 初始化配置
         self.config = AppConfig(CONFIG_FILE)
