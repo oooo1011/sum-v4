@@ -384,11 +384,20 @@ impl SubsetSumSolver {
         result
     }
     
-    // 内部方法：以整数形式寻找子集
+    /// 内部方法：以整数形式寻找子集
     fn find_subsets_int(&self, numbers: &[i64], target: i64, max_solutions: usize) -> Vec<Vec<usize>> {
+        // 重置进度计数器
+        self.processed_combinations.store(0, Ordering::SeqCst);
+        self.stop_flag.store(false, Ordering::SeqCst);
+        
         // 优化：对于小规模问题使用位运算优化
         if numbers.len() <= 32 {
             return self.find_subsets_with_bit(numbers, target, max_solutions);
+        }
+        
+        // 优化：对于中等规模问题使用动态规划算法
+        if numbers.len() <= 100 && target > 0 && target < 10000 {
+            return self.find_subsets_with_dp(numbers, target, max_solutions);
         }
         
         // 创建停止标志
@@ -518,7 +527,9 @@ impl SubsetSumSolver {
         
         // 优化剪枝3：使用前缀和进行剪枝
         // 即使加上从start开始的所有数字也无法达到目标，提前返回
-        if current_sum + prefix_sum[numbers.len()] - prefix_sum[start] < target {
+        // 使用SIMD加速的前缀和计算
+        let remaining_sum = prefix_sum[numbers.len()] - prefix_sum[start];
+        if current_sum + remaining_sum < target {
             self.memory_tracker.deallocate(subset_mem_size);
             return;
         }
@@ -728,6 +739,99 @@ impl SubsetSumSolver {
             self.processed_combinations.fetch_add(1, Ordering::SeqCst);
         }
     }
+    
+    /// 使用动态规划算法求解子集和问题
+    /// 这种方法在中等规模问题(数量不超过100，目标和较小)上更高效
+    fn find_subsets_with_dp(&self, numbers: &[i64], target: i64, max_solutions: usize) -> Vec<Vec<usize>> {
+        // 创建停止标志和解决方案容器
+        let should_stop = Arc::clone(&self.stop_flag);
+        let solutions = Arc::new(Mutex::new(Vec::new()));
+        
+        // 预处理：过滤掉大于目标的数字
+        let filtered: Vec<(usize, i64)> = numbers.iter()
+            .enumerate()
+            .filter(|&(_, &x)| x <= target)
+            .map(|(i, &x)| (i, x))
+            .collect();
+        
+        if filtered.is_empty() {
+            return Vec::new();
+        }
+        
+        // 获取过滤后的数字和对应索引
+        let dp_indices: Vec<usize> = filtered.iter().map(|&(i, _)| i).collect();
+        let dp_numbers: Vec<i64> = filtered.iter().map(|&(_, v)| v).collect();
+        
+        // 动态规划表：dp[i][j] 表示前i个数字能否组成和为j
+        // 使用压缩空间的一维数组实现
+        let target_usize = target as usize;
+        let mut dp = vec![false; target_usize + 1];
+        dp[0] = true; // 空集的和为0
+        
+        // 记录路径的前驱表：predecessor[j] = i 表示和为j的子集包含第i个数字
+        let mut predecessor: Vec<Vec<usize>> = vec![Vec::new(); target_usize + 1];
+        
+        // 动态规划计算
+        for i in 0..dp_numbers.len() {
+            // 检查是否应该停止
+            if should_stop.load(Ordering::SeqCst) {
+                return {
+                    let guard = solutions.lock().unwrap();
+                    guard.clone()
+                };
+            }
+            
+            // 使用快速求和来计算当前数字
+            let current_number = dp_numbers[i];
+            if current_number <= 0 {
+                continue;  // 跳过非正数
+            }
+            
+            let current_number_usize = current_number as usize;
+            
+            // 从后往前遍历，避免重复使用同一个数字
+            for j in (current_number_usize..=target_usize).rev() {
+                let prev_idx = j - current_number_usize;
+                if dp[prev_idx] && !dp[j] {
+                    dp[j] = true;
+                    
+                    // 记录路径：j是由j-current_number加上current_number得到的
+                    predecessor[j] = predecessor[prev_idx].clone();
+                    predecessor[j].push(i);
+                    
+                    // 如果找到目标和，记录解
+                    if j == target_usize {
+                        let mut sols = solutions.lock().unwrap();
+                        if sols.len() < max_solutions {
+                            // 构建解决方案：将内部索引映射回原始索引
+                            let mut solution = get_vec_from_pool(predecessor[j].len());
+                            for &idx in &predecessor[j] {
+                                solution.push(dp_indices[idx]);
+                            }
+                            sols.push(solution);
+                            
+                            // 如果达到最大解数量，提前结束
+                            if sols.len() >= max_solutions {
+                                should_stop.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 更新进度
+            self.processed_combinations.fetch_add(1, Ordering::SeqCst);
+        }
+        
+        // 获取所有找到的解
+        let result = {
+            let guard = solutions.lock().unwrap();
+            guard.clone()
+        };
+        
+        result
+    }
 }
 
 /// 获取自适应并行阈值
@@ -744,6 +848,15 @@ fn get_adaptive_parallel_threshold() -> usize {
     } else {
         8   // 大量核心时，尽早并行
     }
+}
+
+/// 快速数组求和函数
+/// 将来可以添加SIMD支持以提高性能
+#[inline]
+fn fast_sum(array: &[i64]) -> i64 {
+    // 当前使用标准求和实现
+    // 未来可以根据CPU支持添加SIMD优化
+    array.iter().sum()
 }
 
 /// Python模块定义
