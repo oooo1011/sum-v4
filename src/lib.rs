@@ -4,10 +4,15 @@ use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::cell::RefCell;
+use num_cpus;
 
 thread_local! {
-    // 线程局部存储的对象池，避免线程间竞争
-    static SUBSET_POOL: RefCell<Vec<Vec<usize>>> = RefCell::new(Vec::with_capacity(64));
+    // 小型子集池（容量16）- 适用于较浅的递归
+    static SMALL_POOL: RefCell<Vec<Vec<usize>>> = RefCell::new(Vec::with_capacity(256));
+    // 中型子集池（容量64）- 适用于中等递归深度
+    static MEDIUM_POOL: RefCell<Vec<Vec<usize>>> = RefCell::new(Vec::with_capacity(128));
+    // 大型子集池（容量256）- 适用于深递归
+    static LARGE_POOL: RefCell<Vec<Vec<usize>>> = RefCell::new(Vec::with_capacity(64));
 }
 
 /// 内存使用跟踪器，用于监控内存使用情况
@@ -53,29 +58,112 @@ impl MemoryTracker {
     }
 }
 
-/// 从线程本地对象池获取Vec
-fn get_vec_from_pool<T: Clone>() -> Vec<T> {
-    let mut result = Vec::new();
-    SUBSET_POOL.with(|pool| {
-        if let Some(vec) = pool.borrow_mut().pop() {
-            // 类型转换，使其可用于任何T类型
-            let capacity = vec.capacity();
-            drop(vec);
-            result = Vec::with_capacity(capacity);
-        }
-    });
-    result
+/// 优化：压缩表示，使用位图表示子集（适用于32个以内的数字）
+struct CompactSubset {
+    bitmap: u32,
+    count: u8,
 }
 
-/// 将Vec归还给线程本地对象池
+impl CompactSubset {
+    fn new() -> Self {
+        Self { bitmap: 0, count: 0 }
+    }
+    
+    fn add(&mut self, index: usize) {
+        if index < 32 && !self.contains(index) {
+            self.bitmap |= 1 << index;
+            self.count += 1;
+        }
+    }
+    
+    fn contains(&self, index: usize) -> bool {
+        if index < 32 {
+            (self.bitmap & (1 << index)) != 0
+        } else {
+            false
+        }
+    }
+    
+    fn remove(&mut self, index: usize) {
+        if index < 32 && self.contains(index) {
+            self.bitmap &= !(1 << index);
+            self.count -= 1;
+        }
+    }
+    
+    fn to_vec(&self) -> Vec<usize> {
+        let mut result = Vec::with_capacity(self.count as usize);
+        for i in 0..32 {
+            if self.contains(i) {
+                result.push(i);
+            }
+        }
+        result
+    }
+    
+    fn len(&self) -> usize {
+        self.count as usize
+    }
+    
+    fn clear(&mut self) {
+        self.bitmap = 0;
+        self.count = 0;
+    }
+}
+
+/// 根据预期大小从合适的池中获取Vec
+fn get_vec_from_pool(expected_size: usize) -> Vec<usize> {
+    if expected_size <= 16 {
+        SMALL_POOL.with(|pool| {
+            if let Some(vec) = pool.borrow_mut().pop() {
+                vec
+            } else {
+                Vec::with_capacity(16)
+            }
+        })
+    } else if expected_size <= 64 {
+        MEDIUM_POOL.with(|pool| {
+            if let Some(vec) = pool.borrow_mut().pop() {
+                vec
+            } else {
+                Vec::with_capacity(64)
+            }
+        })
+    } else {
+        LARGE_POOL.with(|pool| {
+            if let Some(vec) = pool.borrow_mut().pop() {
+                vec
+            } else {
+                Vec::with_capacity(256)
+            }
+        })
+    }
+}
+
+/// 将Vec归还到合适的池
 fn return_vec_to_pool(mut vec: Vec<usize>) {
     vec.clear();
-    SUBSET_POOL.with(|pool| {
-        // 限制池大小，避免过度缓存
-        if pool.borrow().len() < 128 {
-            pool.borrow_mut().push(vec);
-        }
-    });
+    let cap = vec.capacity();
+    
+    if cap <= 16 {
+        SMALL_POOL.with(|pool| {
+            if pool.borrow().len() < 256 {
+                pool.borrow_mut().push(vec);
+            }
+        });
+    } else if cap <= 64 {
+        MEDIUM_POOL.with(|pool| {
+            if pool.borrow().len() < 128 {
+                pool.borrow_mut().push(vec);
+            }
+        });
+    } else {
+        LARGE_POOL.with(|pool| {
+            if pool.borrow().len() < 64 {
+                pool.borrow_mut().push(vec);
+            }
+        });
+    }
 }
 
 // 获取编译时间和版本号
@@ -193,13 +281,26 @@ impl SubsetSumSolver {
         let total_combinations = if n >= 64 {
             usize::MAX
         } else {
-            (1_usize << n)
+            1_usize << n
         };
         self.total_combinations.store(total_combinations, Ordering::SeqCst);
         
-        // 将浮点数转换为整数（乘以100后四舍五入）
-        // 这避免了浮点数精度问题
-        let scale = 100;
+        // 自动检测小数位数并设置合适的缩放因子
+        let mut max_decimal_places = 0;
+        for &x in &numbers {
+            // 将数字转为字符串，以检测小数位数
+            let s = x.to_string();
+            if let Some(pos) = s.find('.') {
+                let decimal_places = s.len() - pos - 1;
+                max_decimal_places = max_decimal_places.max(decimal_places);
+            }
+        }
+        
+        // 根据检测到的最大小数位数计算缩放因子
+        // 限制为最多10位，避免整数溢出
+        let scale = 10_i64.pow((max_decimal_places as u32).min(10));
+        
+        // 将浮点数转换为整数
         let numbers_int: Vec<i64> = numbers.iter()
             .map(|&x| (x * scale as f64).round() as i64)
             .collect();
@@ -223,8 +324,73 @@ impl SubsetSumSolver {
 
 // 私有实现，不暴露给Python
 impl SubsetSumSolver {
+    // 使用位运算优化的子集和求解（针对小规模问题）
+    fn find_subsets_with_bit(&self, numbers: &[i64], target: i64, max_solutions: usize) -> Vec<Vec<usize>> {
+        let n = numbers.len();
+        if n > 32 {
+            // 超过32个数字时回退到标准解法
+            return self.find_subsets_int(numbers, target, max_solutions);
+        }
+        
+        let should_stop = Arc::clone(&self.stop_flag);
+        let solutions = Arc::new(Mutex::new(Vec::new()));
+        let total_combinations = 1u64 << n;
+        
+        // 使用rayon的并行迭代器处理
+        (1..total_combinations).into_par_iter()
+            // 不使用with_max_len方法，因为对u64迭代器不支持
+            .for_each(|mask| {
+                // 检查是否应该停止
+                if should_stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                
+                // 计算当前子集的和
+                let mut sum = 0;
+                for i in 0..n {
+                    if (mask & (1 << i)) != 0 {
+                        sum += numbers[i];
+                    }
+                }
+                
+                // 找到一个解（精确匹配）
+                if sum == target {
+                    let mut sols = solutions.lock().unwrap();
+                    if sols.len() < max_solutions {
+                        // 创建子集
+                        let mut subset = Vec::with_capacity(n.count_ones() as usize);
+                        for i in 0..n {
+                            if (mask & (1 << i)) != 0 {
+                                subset.push(i);
+                            }
+                        }
+                        sols.push(subset);
+                        
+                        if sols.len() >= max_solutions {
+                            should_stop.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                
+                // 更新进度
+                self.processed_combinations.fetch_add(1, Ordering::SeqCst);
+            });
+        
+        // 修复生命周期问题：先获取锁，解除锁，然后返回结果
+        let result = {
+            let guard = solutions.lock().unwrap();
+            guard.clone()
+        };
+        result
+    }
+    
     // 内部方法：以整数形式寻找子集
     fn find_subsets_int(&self, numbers: &[i64], target: i64, max_solutions: usize) -> Vec<Vec<usize>> {
+        // 优化：对于小规模问题使用位运算优化
+        if numbers.len() <= 32 {
+            return self.find_subsets_with_bit(numbers, target, max_solutions);
+        }
+        
         // 创建停止标志
         let should_stop = Arc::clone(&self.stop_flag);
         
@@ -232,11 +398,16 @@ impl SubsetSumSolver {
         let solutions = Arc::new(Mutex::new(Vec::new()));
         
         // 使用对象池获取初始子集
-        let mut current_subset = get_vec_from_pool();
+        let mut current_subset = get_vec_from_pool(16);
+        
+        // 预处理数据
+        let (sorted_numbers, sorted_indices, prefix_sum) = self.preprocess_data(numbers, target);
         
         // 开始回溯搜索
-        self.backtrack_int(
-            numbers,
+        self.backtrack_optimized(
+            &sorted_numbers,
+            &sorted_indices,
+            &prefix_sum,
             target,
             0,
             0,
@@ -250,15 +421,49 @@ impl SubsetSumSolver {
         return_vec_to_pool(current_subset);
         
         // 释放锁，获取结果
-        let result = solutions.lock().unwrap().clone();
+        let result = {
+            let guard = solutions.lock().unwrap();
+            guard.clone()
+        };
         
         result
     }
     
-    // 回溯搜索核心算法
-    fn backtrack_int(
+    /// 预处理数据，优化搜索效率
+    fn preprocess_data(&self, numbers: &[i64], target: i64) -> (Vec<i64>, Vec<usize>, Vec<i64>) {
+        // 1. 过滤掉大于目标的数字（对于正数问题）
+        let filtered: Vec<(usize, i64)> = numbers.iter()
+            .enumerate()
+            .filter(|&(_, &x)| x <= target)
+            .map(|(i, &x)| (i, x))  // 解引用，避免类型不匹配
+            .collect();
+        
+        // 2. 根据与目标值的差异排序
+        let abs_diff = |a: i64| (a - target).abs();
+        let mut index_map = filtered.clone();
+        index_map.sort_by(|a, b| abs_diff(a.1).cmp(&abs_diff(b.1)));
+        
+        // 3. 提取排序后的数字和原始索引
+        let sorted_numbers: Vec<i64> = index_map.iter().map(|&(_, v)| v).collect();
+        let sorted_indices: Vec<usize> = index_map.iter().map(|&(i, _)| i).collect();
+        
+        // 4. 计算前缀和，用于优化剪枝
+        let mut prefix_sum = vec![0; sorted_numbers.len() + 1];
+        
+        // 计算前缀和
+        for i in 0..sorted_numbers.len() {
+            prefix_sum[i + 1] = prefix_sum[i] + sorted_numbers[i];
+        }
+        
+        (sorted_numbers, sorted_indices, prefix_sum)
+    }
+    
+    // 优化的回溯搜索，包含增强的剪枝和工作窃取调度
+    fn backtrack_optimized(
         &self,
         numbers: &[i64],
+        pos_to_orig: &[usize],
+        prefix_sum: &[i64],
         target: i64,
         start: usize,
         current_sum: i64,
@@ -284,9 +489,11 @@ impl SubsetSumSolver {
         if current_sum == target {
             let mut sols = solutions.lock().unwrap();
             if sols.len() < max_solutions {
-                // 使用对象池获取新的Vec来存储解决方案
-                let mut solution = get_vec_from_pool();
-                solution.extend_from_slice(current_subset);
+                // 将当前子集转换回原始索引
+                let mut solution = get_vec_from_pool(current_subset.len());
+                for pos in current_subset.iter() {
+                    solution.push(pos_to_orig[*pos]);
+                }
                 sols.push(solution);
                 
                 if sols.len() >= max_solutions {
@@ -297,102 +504,220 @@ impl SubsetSumSolver {
             return;
         }
         
-        // 剪枝：如果当前和已经超过目标，不需要继续（因为所有数字都是正数）
+        // 优化剪枝1：如果当前和已经超过目标，不需要继续（因为所有数字都是正数）
         if current_sum > target {
             self.memory_tracker.deallocate(subset_mem_size);
             return;
         }
         
-        // 剪枝：如果已经到达列表末尾，不需要继续
+        // 优化剪枝2：如果已经到达列表末尾，不需要继续
         if start >= numbers.len() {
             self.memory_tracker.deallocate(subset_mem_size);
             return;
         }
-
+        
+        // 优化剪枝3：使用前缀和进行剪枝
+        // 即使加上从start开始的所有数字也无法达到目标，提前返回
+        if current_sum + prefix_sum[numbers.len()] - prefix_sum[start] < target {
+            self.memory_tracker.deallocate(subset_mem_size);
+            return;
+        }
+        
+        // 使用前缀和评估当前分支
+        let evaluate_branch = |from: usize, to: usize| -> i64 {
+            if from >= to || from >= numbers.len() {
+                return 0;
+            }
+            let end = to.min(numbers.len());
+            // 使用前缀和快速计算范围总和
+            prefix_sum[end] - prefix_sum[from]
+        };
+        
         // 并行阈值：当剩余数字较多时使用并行处理
-        // 这个阈值可以根据实际性能测试进行调整
-        let parallel_threshold = 16;
+        // 使用自适应阈值，根据CPU核心数自动调整
+        let parallel_threshold = get_adaptive_parallel_threshold();
         let remaining_numbers = numbers.len() - start;
-
+        
         if remaining_numbers > parallel_threshold && current_subset.len() < 3 {
+            // 优化：工作窃取调度优化
+            // 计算分割点，使得左右两部分工作量更加均衡
+            let mid = start + remaining_numbers / 2;
+            
+            // 计算左右两部分与目标的差距
+            let left_sum = prefix_sum[mid] - prefix_sum[start];
+            let right_sum = prefix_sum[numbers.len()] - prefix_sum[mid];
+            
+            // 决定优先处理哪一部分
+            // 使用前缀和评估函数
+            let left_potential = evaluate_branch(start, mid);
+            let right_potential = evaluate_branch(mid, numbers.len());
+            
+            let left_diff = (target - current_sum - left_potential).abs();
+            let right_diff = (target - current_sum - right_potential).abs();
+            
+            // 优先处理更接近目标的一侧
+            let process_left_first = left_diff < right_diff;
+            
             // 使用rayon的join进行并行处理，实现工作窃取调度
-            // 创建两个分支：选择当前数字和不选择当前数字
             let solutions_arc = Arc::clone(solutions);
             let should_stop_arc = Arc::clone(should_stop);
             
-            // 使用对象池获取子集副本，避免频繁分配内存
-            let mut subset_with_current = get_vec_from_pool();
-            subset_with_current.extend_from_slice(current_subset);
-            subset_with_current.push(start);
-            
-            rayon::join(
-                // 分支1：选择当前数字
-                || {
-                    if !should_stop_arc.load(Ordering::SeqCst) {
-                        self.backtrack_int(
-                            numbers,
-                            target,
-                            start + 1,
-                            current_sum + numbers[start],
-                            &mut subset_with_current,
-                            &solutions_arc,
-                            max_solutions,
-                            &should_stop_arc,
-                        );
+            if process_left_first {
+                // 创建两个处理分支
+                let mut left_subset = get_vec_from_pool(current_subset.len() + (mid - start));
+                left_subset.extend_from_slice(current_subset);
+                
+                let mut right_subset = get_vec_from_pool(current_subset.len() + (numbers.len() - mid));
+                right_subset.extend_from_slice(current_subset);
+                
+                // 并行处理两部分，优先处理左侧
+                rayon::join(
+                    || {
+                        // 处理左半部分 [start, mid)
+                        for i in start..mid {
+                            if should_stop_arc.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            
+                            // 选择当前数字
+                            left_subset.push(i);
+                            self.backtrack_optimized(
+                                numbers,
+                                pos_to_orig,
+                                prefix_sum,
+                                target,
+                                i + 1,
+                                current_sum + numbers[i],
+                                &mut left_subset,
+                                &solutions_arc,
+                                max_solutions,
+                                &should_stop_arc,
+                            );
+                            left_subset.pop();
+                            
+                            // 不选择当前数字（隐含在循环中）
+                        }
+                        return_vec_to_pool(left_subset);
+                    },
+                    || {
+                        // 处理右半部分 [mid, end)
+                        for i in mid..numbers.len() {
+                            if should_stop_arc.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            
+                            // 选择当前数字
+                            right_subset.push(i);
+                            self.backtrack_optimized(
+                                numbers,
+                                pos_to_orig,
+                                prefix_sum,
+                                target,
+                                i + 1,
+                                current_sum + numbers[i],
+                                &mut right_subset,
+                                &solutions_arc,
+                                max_solutions,
+                                &should_stop_arc,
+                            );
+                            right_subset.pop();
+                            
+                            // 不选择当前数字（隐含在循环中）
+                        }
+                        return_vec_to_pool(right_subset);
                     }
-                    // 记得将Vec归还到对象池
-                    return_vec_to_pool(subset_with_current);
-                },
-                // 分支2：不选择当前数字
-                || {
-                    if !should_stop_arc.load(Ordering::SeqCst) {
-                        // 使用对象池获取另一个子集副本
-                        let mut subset_without_current = get_vec_from_pool();
-                        subset_without_current.extend_from_slice(current_subset);
-                        
-                        self.backtrack_int(
-                            numbers,
-                            target,
-                            start + 1,
-                            current_sum,
-                            &mut subset_without_current,
-                            &solutions_arc,
-                            max_solutions,
-                            &should_stop_arc,
-                        );
-                        
-                        // 归还到对象池
-                        return_vec_to_pool(subset_without_current);
+                );
+            } else {
+                // 创建两个处理分支
+                let mut left_subset = get_vec_from_pool(current_subset.len() + (mid - start));
+                left_subset.extend_from_slice(current_subset);
+                
+                let mut right_subset = get_vec_from_pool(current_subset.len() + (numbers.len() - mid));
+                right_subset.extend_from_slice(current_subset);
+                
+                // 并行处理两部分，优先处理右侧
+                rayon::join(
+                    || {
+                        // 处理右半部分 [mid, end)
+                        for i in mid..numbers.len() {
+                            if should_stop_arc.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            
+                            // 选择当前数字
+                            right_subset.push(i);
+                            self.backtrack_optimized(
+                                numbers,
+                                pos_to_orig,
+                                prefix_sum,
+                                target,
+                                i + 1,
+                                current_sum + numbers[i],
+                                &mut right_subset,
+                                &solutions_arc,
+                                max_solutions,
+                                &should_stop_arc,
+                            );
+                            right_subset.pop();
+                            
+                            // 不选择当前数字（隐含在循环中）
+                        }
+                        return_vec_to_pool(right_subset);
+                    },
+                    || {
+                        // 处理左半部分 [start, mid)
+                        for i in start..mid {
+                            if should_stop_arc.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            
+                            // 选择当前数字
+                            left_subset.push(i);
+                            self.backtrack_optimized(
+                                numbers,
+                                pos_to_orig,
+                                prefix_sum,
+                                target,
+                                i + 1,
+                                current_sum + numbers[i],
+                                &mut left_subset,
+                                &solutions_arc,
+                                max_solutions,
+                                &should_stop_arc,
+                            );
+                            left_subset.pop();
+                            
+                            // 不选择当前数字（隐含在循环中）
+                        }
+                        return_vec_to_pool(left_subset);
                     }
-                },
-            );
+                );
+            }
         } else {
             // 串行处理：当剩余数字较少或递归深度较大时
-            // 选择当前数字
-            current_subset.push(start);
-            self.backtrack_int(
-                numbers, 
-                target, 
-                start + 1, 
-                current_sum + numbers[start], 
-                current_subset, 
-                solutions, 
-                max_solutions, 
-                should_stop,
-            );
-            current_subset.pop();
-            
-            // 不选择当前数字
-            self.backtrack_int(
-                numbers,
-                target,
-                start + 1,
-                current_sum,
-                current_subset,
-                solutions,
-                max_solutions,
-                should_stop,
-            );
+            for i in start..numbers.len() {
+                if should_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                
+                // 选择当前数字
+                current_subset.push(i);
+                self.backtrack_optimized(
+                    numbers,
+                    pos_to_orig,
+                    prefix_sum,
+                    target,
+                    i + 1,
+                    current_sum + numbers[i],
+                    current_subset,
+                    solutions,
+                    max_solutions,
+                    should_stop,
+                );
+                current_subset.pop();
+                
+                // 不选择当前数字（隐含在循环中）
+            }
         }
         
         // 释放当前子集占用的内存计数
@@ -402,6 +727,22 @@ impl SubsetSumSolver {
         if start == 0 {
             self.processed_combinations.fetch_add(1, Ordering::SeqCst);
         }
+    }
+}
+
+/// 获取自适应并行阈值
+fn get_adaptive_parallel_threshold() -> usize {
+    let cpu_cores = num_cpus::get();
+    
+    // 根据CPU核心数自动调整并行阈值
+    if cpu_cores <= 2 {
+        24  // 对于双核CPU，大问题才并行
+    } else if cpu_cores <= 4 {
+        16  // 4核CPU的标准阈值
+    } else if cpu_cores <= 8 {
+        12  // 多核CPU，更激进的并行策略
+    } else {
+        8   // 大量核心时，尽早并行
     }
 }
 
