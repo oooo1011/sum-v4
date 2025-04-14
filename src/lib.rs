@@ -479,20 +479,41 @@ impl SubsetSumSolver {
         max_solutions: usize,
         should_stop: &Arc<AtomicBool>,
     ) {
-        // 检查是否应该停止
+        // 最常见的终止条件，放在最前面：检查是否应该停止
         if should_stop.load(Ordering::SeqCst) {
             return;
         }
         
-        // 检查内存使用情况
+        // 优化剪枝2：如果已经到达列表末尾，不需要继续（这是最简单的检查）
+        if start >= numbers.len() {
+            return;
+        }
+        
+        // 优化剪枝1：如果当前和已经超过目标，不需要继续（因为所有数字都是正数）
+        // 这个判断很常见且计算开销小
+        if current_sum > target {
+            return;
+        }
+        
+        // 计算内存使用大小（这个操作很快）
         let subset_mem_size = current_subset.capacity() * std::mem::size_of::<usize>();
+        
+        // 优化剪枝3：使用前缀和进行剪枝
+        // 即使加上从start开始的所有数字也无法达到目标，提前返回
+        // 使用SIMD加速的前缀和计算，这个判断需要一些计算，但可以快速剪掉大量不可能的分支
+        let remaining_sum = range_sum_simd(prefix_sum, start, numbers.len());
+        if current_sum + remaining_sum < target {
+            return;
+        }
+        
+        // 检查内存使用情况（这个操作相对复杂，可能会触发锁竞争）
         if !self.memory_tracker.allocate(subset_mem_size) {
             self.memory_tracker.deallocate(subset_mem_size);
             should_stop.store(true, Ordering::SeqCst);
             return;
         }
         
-        // 找到一个解（使用精确整数比较）
+        // 找到一个解（使用精确整数比较）- 相对不那么频繁的分支，放在后面
         if current_sum == target {
             let mut sols = solutions.lock().unwrap();
             if sols.len() < max_solutions {
@@ -507,27 +528,6 @@ impl SubsetSumSolver {
                     should_stop.store(true, Ordering::SeqCst);
                 }
             }
-            self.memory_tracker.deallocate(subset_mem_size);
-            return;
-        }
-        
-        // 优化剪枝1：如果当前和已经超过目标，不需要继续（因为所有数字都是正数）
-        if current_sum > target {
-            self.memory_tracker.deallocate(subset_mem_size);
-            return;
-        }
-        
-        // 优化剪枝2：如果已经到达列表末尾，不需要继续
-        if start >= numbers.len() {
-            self.memory_tracker.deallocate(subset_mem_size);
-            return;
-        }
-        
-        // 优化剪枝3：使用前缀和进行剪枝
-        // 即使加上从start开始的所有数字也无法达到目标，提前返回
-        // 使用SIMD加速的前缀和计算
-        let remaining_sum = range_sum_simd(prefix_sum, start, numbers.len());
-        if current_sum + remaining_sum < target {
             self.memory_tracker.deallocate(subset_mem_size);
             return;
         }
@@ -1446,20 +1446,41 @@ fn backtrack_optimized(
     max_solutions: usize,
     should_stop: &Arc<AtomicBool>,
 ) {
-    // 检查是否应该停止
+    // 最常见的终止条件，放在最前面：检查是否应该停止
     if should_stop.load(Ordering::SeqCst) {
         return;
     }
     
-    // 检查内存使用情况
+    // 优化剪枝2：如果已经到达列表末尾，不需要继续（这是最简单的检查）
+    if start >= numbers.len() {
+        return;
+    }
+    
+    // 优化剪枝1：如果当前和已经超过目标，不需要继续（因为所有数字都是正数）
+    // 这个判断很常见且计算开销小
+    if current_sum > target {
+        return;
+    }
+    
+    // 计算内存使用大小（这个操作很快）
     let subset_mem_size = current_subset.capacity() * std::mem::size_of::<usize>();
+    
+    // 优化剪枝3：使用前缀和进行剪枝
+    // 即使加上从start开始的所有数字也无法达到目标，提前返回
+    // 使用SIMD加速的前缀和计算，这个判断需要一些计算，但可以快速剪掉大量不可能的分支
+    let remaining_sum = range_sum_simd(prefix_sum, start, numbers.len());
+    if current_sum + remaining_sum < target {
+        return;
+    }
+    
+    // 检查内存使用情况（这个操作相对复杂，可能会触发锁竞争）
     if !MemoryTracker::new(1024).allocate(subset_mem_size) {
         MemoryTracker::new(1024).deallocate(subset_mem_size);
         should_stop.store(true, Ordering::SeqCst);
         return;
     }
     
-    // 找到一个解（使用精确整数比较）
+    // 找到一个解（使用精确整数比较）- 相对不那么频繁的分支，放在后面
     if current_sum == target {
         let mut sols = solutions.lock().unwrap();
         if sols.len() < max_solutions {
@@ -1474,27 +1495,6 @@ fn backtrack_optimized(
                 should_stop.store(true, Ordering::SeqCst);
             }
         }
-        MemoryTracker::new(1024).deallocate(subset_mem_size);
-        return;
-    }
-    
-    // 优化剪枝1：如果当前和已经超过目标，不需要继续（因为所有数字都是正数）
-    if current_sum > target {
-        MemoryTracker::new(1024).deallocate(subset_mem_size);
-        return;
-    }
-    
-    // 优化剪枝2：如果已经到达列表末尾，不需要继续
-    if start >= numbers.len() {
-        MemoryTracker::new(1024).deallocate(subset_mem_size);
-        return;
-    }
-    
-    // 优化剪枝3：使用前缀和进行剪枝
-    // 即使加上从start开始的所有数字也无法达到目标，提前返回
-    // 使用SIMD加速的前缀和计算
-    let remaining_sum = range_sum_simd(prefix_sum, start, numbers.len());
-    if current_sum + remaining_sum < target {
         MemoryTracker::new(1024).deallocate(subset_mem_size);
         return;
     }
