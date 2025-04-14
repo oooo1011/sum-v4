@@ -1,6 +1,6 @@
 [package]
 name = "subset_sum"
-version = "1.5.1"
+version = "1.5.4"
 edition = "2021"
 
 [lib]
