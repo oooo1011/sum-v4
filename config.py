@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 
 # 应用程序配置
 APP_NAME = "子集组合求和"
-APP_VERSION = "1.5.6-UI"  # UI布局优化版本
+APP_VERSION = "1.6.0-UI"  # 混合算法策略优化版本
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_config.json")
 DEFAULT_THEME = "dark"  # 默认主题模式
 
