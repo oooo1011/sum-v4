@@ -454,19 +454,40 @@ class SubsetSumApp:
         
         self.current_solutions = solutions
         
-        for i, solution in enumerate(solutions):
-            self.result_text.insert(tk.END, f"解决方案 {i+1}:\n")
-            self.result_text.insert(tk.END, f"子集: {', '.join([str(x) for x in solution])}\n")
-            self.result_text.insert(tk.END, f"和: {sum(solution)}\n\n")
+        # 按导出样式显示结果
+        if solutions:
+            # 使用第一个解决方案作为参考
+            selected_solution = solutions[0]
+            selected_numbers = set(selected_solution)
+            
+            # 创建表格形式的显示
+            self.result_text.insert(tk.END, "输入数字列表              选中子集\n")
+            self.result_text.insert(tk.END, "----------------------------------------\n")
+            
+            # 显示所有输入数字，并高亮选中项
+            for num in self.input_numbers:
+                is_selected = num in selected_numbers
+                # 使用制表符对齐
+                if is_selected:
+                    self.result_text.insert(tk.END, f"{num:<20.2f} {num:>15.2f} ←\n")
+                else:
+                    self.result_text.insert(tk.END, f"{num:<20.2f}\n")
+            
+            # 显示子集和
+            self.result_text.insert(tk.END, "\n----------------------------------------\n")
+            subset_sum = sum(selected_solution)
+            self.result_text.insert(tk.END, f"子集和: {subset_sum:.2f}\n\n")
+            
+            # 如果有多个解决方案，显示其他解决方案的简要信息
+            if len(solutions) > 1:
+                self.result_text.insert(tk.END, f"\n其他解决方案 ({len(solutions)-1} 个):\n")
+                for i, solution in enumerate(solutions[1:], 2):
+                    self.result_text.insert(tk.END, f"方案 {i}: 子集和 = {sum(solution):.2f}, 元素数 = {len(solution)}\n")
         
         self.result_text.configure(state="disabled")
         self.export_button.configure(state="normal")
         self.status_var.set(f"计算完成，找到 {len(solutions)} 个解决方案，用时 {elapsed_time:.3f} 秒")
         
-        # 如果启用了可视化，显示图表
-        if self.config.get("show_visualization", True) and solutions:
-            Visualizer.create_visualization(self.canvas_frame, self.input_numbers, solutions[0])
-            
         # 恢复UI状态
         self._enable_ui()
     

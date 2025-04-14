@@ -746,18 +746,19 @@ def create_result_area(parent_frame, subtitle_font, export_callback):
                                  command=export_callback, state="disabled")
     export_button.pack(side=tk.RIGHT)
     
-    result_text = ctk.CTkTextbox(result_frame, width=400, height=200)
-    result_text.pack(fill=tk.BOTH, expand=True, padx=10)
+    # 创建结果显示框架，使用更大的文本框展示结果
+    result_display_frame = ctk.CTkFrame(result_frame)
+    result_display_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
     
-    # 可视化区域
-    viz_frame = ctk.CTkFrame(result_frame)
-    viz_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 10))
+    # 结果文本区域，使用更大的空间并优化显示
+    result_text = ctk.CTkTextbox(result_display_frame, width=400, height=500)
+    result_text.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
     
-    viz_label = ctk.CTkLabel(viz_frame, text="结果可视化", font=subtitle_font)
-    viz_label.pack(anchor=tk.W, pady=5)
+    # 设置文本区域字体和格式
+    result_text.configure(font=("Consolas", 12))
     
-    canvas_frame = ctk.CTkFrame(viz_frame)
-    canvas_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 5))
+    # 用于保持API兼容性
+    canvas_frame = tk.Frame()  # 空的框架作为placeholder
     
     return (progress_bar, progress_label, result_text, export_button, canvas_frame)
 
