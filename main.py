@@ -454,35 +454,71 @@ class SubsetSumApp:
         
         self.current_solutions = solutions
         
-        # 按导出样式显示结果
-        if solutions:
-            # 使用第一个解决方案作为参考
-            selected_solution = solutions[0]
-            selected_numbers = set(selected_solution)
+        # 解决方案导航部分
+        if len(solutions) > 1:
+            self.result_text.insert(tk.END, f"共找到 {len(solutions)} 个解决方案 (以下显示第1个解决方案的详细信息)\n")
+            self.result_text.insert(tk.END, "要查看其他解决方案，请导出到Excel查看完整结果\n\n")
+        
+        # 为第一个解决方案找到原始输入中对应的索引 - 完全重写和修复
+        
+        # 预处理输入数字，建立值到索引的映射
+        original_value_to_indices = {}
+        for i, num in enumerate(self.input_numbers):
+            if num not in original_value_to_indices:
+                original_value_to_indices[num] = []
+            original_value_to_indices[num].append(i)
+        
+        # 只处理第一个解决方案用于详细显示
+        first_solution = solutions[0]
+        
+        # 定义解决方案匹配函数
+        def match_solution(solution):
+            # 为这个解决方案创建一个独立的可用索引集
+            available_indices = {}
+            for val, indices in original_value_to_indices.items():
+                available_indices[val] = indices.copy()  # 复制确保独立
             
-            # 创建表格形式的显示
-            self.result_text.insert(tk.END, "输入数字列表              选中子集\n")
-            self.result_text.insert(tk.END, "----------------------------------------\n")
+            # 收集匹配的索引
+            matched_indices = []
             
-            # 显示所有输入数字，并高亮选中项
-            for num in self.input_numbers:
-                is_selected = num in selected_numbers
-                # 使用制表符对齐
-                if is_selected:
-                    self.result_text.insert(tk.END, f"{num:<20.2f} {num:>15.2f} ←\n")
-                else:
-                    self.result_text.insert(tk.END, f"{num:<20.2f}\n")
+            # 为每个元素找到匹配项
+            for val in solution:
+                if val in available_indices and available_indices[val]:
+                    # 使用最前面的可用索引
+                    idx = available_indices[val].pop(0)  # 弹出并移除第一个可用索引
+                    matched_indices.append(idx)
             
-            # 显示子集和
-            self.result_text.insert(tk.END, "\n----------------------------------------\n")
-            subset_sum = sum(selected_solution)
-            self.result_text.insert(tk.END, f"子集和: {subset_sum:.2f}\n\n")
+            return matched_indices
+        
+        # 应用匹配函数找到第一个解决方案的索引
+        first_solution_idx = match_solution(first_solution)
             
-            # 如果有多个解决方案，显示其他解决方案的简要信息
-            if len(solutions) > 1:
-                self.result_text.insert(tk.END, f"\n其他解决方案 ({len(solutions)-1} 个):\n")
-                for i, solution in enumerate(solutions[1:], 2):
-                    self.result_text.insert(tk.END, f"方案 {i}: 子集和 = {sum(solution):.2f}, 元素数 = {len(solution)}\n")
+        # 创建表格形式的显示 - 第一个解决方案
+        self.result_text.insert(tk.END, "输入数字列表              选中子集\n")
+        self.result_text.insert(tk.END, "----------------------------------------\n")
+        
+        # 显示所有输入数字，并根据索引高亮选中项
+        # first_solution_idx已在上面定义
+        
+        # 遍历所有输入数字
+        for i, num in enumerate(self.input_numbers):
+            is_selected = i in first_solution_idx
+            # 使用制表符对齐
+            if is_selected:
+                self.result_text.insert(tk.END, f"{num:<20.2f} {num:>15.2f} ←\n")
+            else:
+                self.result_text.insert(tk.END, f"{num:<20.2f}\n")
+        
+        # 显示子集和
+        self.result_text.insert(tk.END, "\n----------------------------------------\n")
+        subset_sum = sum(solutions[0])
+        self.result_text.insert(tk.END, f"子集和: {subset_sum:.2f}\n\n")
+        
+        # 如果有多个解决方案，显示其他解决方案的简要信息
+        if len(solutions) > 1:
+            self.result_text.insert(tk.END, f"其他解决方案简要信息:\n")
+            for i, solution in enumerate(solutions[1:], 2):
+                self.result_text.insert(tk.END, f"方案 {i}: 子集和 = {sum(solution):.2f}, 元素数 = {len(solution)}\n")
         
         self.result_text.configure(state="disabled")
         self.export_button.configure(state="normal")
